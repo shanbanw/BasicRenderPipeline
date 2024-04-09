@@ -1,0 +1,30 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8f2c092210b597a4e8b5caec41b4d63b, type: 3}
+  m_Name: BasicRenderPipelineRuntimeResources
+  m_EditorClassIdentifier: 
+  shaders:
+    downScaleCS: {fileID: 7200000, guid: f2289798c57f9dc44a88bac38434968f, type: 3}
+    blurCS: {fileID: 7200000, guid: e3ffd7bcfbb65aa45930a1b4850eaf3b, type: 3}
+    bokehHighlightScan: {fileID: 7200000, guid: e1107492a9a0c0b4e8a1ba23936a9b16, type: 3}
+    ssaoCS: {fileID: 7200000, guid: fa4fccd3694c51b47a5bacd3ba98f1f0, type: 3}
+    rainSimulationCS: {fileID: 7200000, guid: c8fcec08fc1bd014882b62bc8508ce26, type: 3}
+    occlusionCS: {fileID: 7200000, guid: 7ba86fd13274b5d4d95bab797cf966ae, type: 3}
+    decalGenCS: {fileID: 7200000, guid: 8ffd184f1824ca74f99caeee8f6c91a4, type: 3}
+  materials:
+    bokehRenderMat: {fileID: 2100000, guid: fb55818c4fc8eda4b89146395379ade3, type: 2}
+    rainRenderer: {fileID: 2100000, guid: 6f5127251de679b41a1511426f603730, type: 2}
+    lightRayRender: {fileID: 2100000, guid: 3ae6f7961939b6a48a6b7d60be13027c, type: 2}
+    sslrCombine: {fileID: 2100000, guid: 4c157b421f532334096403a3ca0f07b7, type: 2}
+    decalRender: {fileID: 2100000, guid: ec3bf88196721134e8f4b2b70eaa17ce, type: 2}
+  textures:
+    noiseTex: {fileID: 2800000, guid: 9c6b128b20f78d54e82fc7eed2e8cd88, type: 3}

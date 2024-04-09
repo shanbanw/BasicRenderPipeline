@@ -1,0 +1,161 @@
+
+#pragma kernel DecalGen
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "ShaderVariablesDecals.cs.hlsl"
+
+#define MAX_NEW_VERT 6
+
+ByteAddressBuffer _VertexBuffer;
+ByteAddressBuffer _IndexBuffer;
+
+AppendStructuredBuffer<DecalVertexLayout> _DecalBuffer;
+
+void GetVertexIndex(uint triIndex, out uint vertexIndex[3])
+{
+    uint byteIndex = triIndex * 6;
+    uint2 index = _IndexBuffer.Load2(byteIndex);
+    if (byteIndex % 4 == 0)
+    {
+        vertexIndex[0] = asuint((index.x << 16) >> 16);
+        vertexIndex[1] = asuint(index.x >> 16);
+        vertexIndex[2] = asuint((index.y << 16) >> 16);
+    }
+    else
+    {
+        vertexIndex[0] = asuint(index.x >> 16);
+        vertexIndex[1] = asuint((index.y << 16) >> 16);
+        vertexIndex[2] = asuint(index.y >> 16);
+    }
+}
+
+void GetTriangle(uint triIndex, out float4 verts[3], out float3 normals[3])
+{
+    uint vertexIndex[3];
+    GetVertexIndex(triIndex, vertexIndex);
+
+    [unroll]
+    for(uint i = 0; i < 3; i++)
+    {
+        uint vertByteIndex = vertexIndex[i] * _VertexBufferStride;
+        uint posIndex = vertByteIndex + _PositionAttributeOffset;
+        uint normalIndex = vertByteIndex + _NormalAttributeOffset;
+        float3 pos = asfloat(_VertexBuffer.Load3(posIndex));
+        float3 normal = asfloat(_VertexBuffer.Load3(normalIndex));
+        verts[i] = mul(_ObjectToWorld, float4(pos, 1.0));
+        normals[i] = mul((float3x3)_ObjectToWorld, normal);
+    }
+}
+
+void PlaneSegIntersec(float4 p1, float3 normal1, float4 p2, float3 normal2, float4 plane, out float4 intersectPos, out float3 intersectNorm)
+{
+    float3 segDir = p2.xyz - p1.xyz;
+    float segDist = length(segDir);
+    segDir = segDir / segDist;
+    float unit = dot(plane.xyz, segDir);
+    float dist = -dot(plane, p1) / unit;
+    intersectPos = float4(p1.xyz + dist * segDir, 1.0);
+    intersectNorm = lerp(normal1, normal2, dist / segDist);
+    intersectNorm = normalize(intersectNorm);
+}
+
+void PolyPlane(float4 verts[MAX_NEW_VERT], float3 normals[MAX_NEW_VERT], float arrDot[MAX_NEW_VERT], uint numVerts, float4 plane, out float4 newVerts[MAX_NEW_VERT], out float3 newNormals[MAX_NEW_VERT], out uint curNewVert)
+{
+    newVerts = (float4[MAX_NEW_VERT])100000.0;
+    curNewVert = 0;
+
+    for(uint i = 0; i < numVerts; i++)
+    {
+        if(arrDot[i] >= 0)
+        {
+            newVerts[curNewVert] = verts[i];
+            newNormals[curNewVert] = normals[i];
+            curNewVert++;
+
+            if(arrDot[(i+1)%numVerts] < 0)
+            {
+                PlaneSegIntersec(verts[i], normals[i], verts[(i+1)%numVerts], normals[(i+1)%numVerts], plane, newVerts[curNewVert], newNormals[curNewVert]);
+                curNewVert++;
+            }
+            
+        }
+        else if(arrDot[(i+1)%numVerts]>=0)
+        {
+            PlaneSegIntersec(verts[i], normals[i], verts[(i+1)%numVerts], normals[(i+1)%numVerts], plane, newVerts[curNewVert], newNormals[curNewVert]);
+            curNewVert++;
+        }
+    }
+}
+
+[numthreads(1, 1, 1)]
+void DecalGen(uint dispatchThreadId : SV_DISPATCHTHREADID)
+{
+    float4 verts[3];
+    float3 normals[3];
+    GetTriangle(dispatchThreadId.x, verts, normals);
+    //DecalVertexLayout v;
+    //v.position0 = verts[0];
+    //v.normal0 = normals[0];
+    //v.uv0 = float2(0,0);
+    //v.position1 = verts[1];
+    //v.normal1 = normals[1];
+    //v.uv1 = float2(0,1);
+    //v.position2 = verts[2];
+    //v.normal2 = normals[2];
+    //v.uv2 = float2(0,2);
+    //_DecalBuffer.Append(v);
+
+    uint numVerts = 0;
+    float4 newVerts[MAX_NEW_VERT] = (float4[MAX_NEW_VERT])100000.0;
+    float3 newNormals[MAX_NEW_VERT] = (float3[MAX_NEW_VERT])0.0;
+    float arrDot[MAX_NEW_VERT] = (float[MAX_NEW_VERT])0;
+
+    newVerts[0] = verts[0];
+    newVerts[1] = verts[1];
+    newVerts[2] = verts[2];
+    newNormals[0] = normals[0];
+    newNormals[1] = normals[1];
+    newNormals[2] = normals[2];
+
+    //
+    float3 v01 = newVerts[1].xyz - newVerts[0].xyz;
+    float3 v02 = newVerts[2].xyz - newVerts[0].xyz;
+    float3 faceNorm = cross(v01, v02);
+    float fDot = dot(faceNorm, _HitNormal);
+    numVerts = 3 * (fDot > 0.01);
+
+    for(uint curPlane = 0; curPlane < 6; curPlane++)
+    {
+        for (uint i = 0; i < MAX_NEW_VERT; i++)
+        {
+            arrDot[i] = dot(_ClipPlane[curPlane], newVerts[i]);
+        }
+
+        uint newNumVerts = 0;
+        PolyPlane(newVerts, newNormals, arrDot, numVerts, _ClipPlane[curPlane], newVerts, newNormals, newNumVerts);
+        numVerts = newNumVerts;
+    }
+
+    DecalVertexLayout vert;
+    for(uint curVert = 1; curVert < numVerts - 1 && numVerts > 0; curVert++)
+    {
+        vert.position0 = newVerts[0].xyz;
+        vert.normal0 = newNormals[0];
+        vert.uv0.x = dot(newVerts[0], _ClipPlane[1]);
+        vert.uv0.y = dot(newVerts[0], _ClipPlane[3]);
+        vert.uv0 = vert.uv0 / _DecalSize;
+
+        vert.position1 = newVerts[curVert].xyz;
+        vert.normal1 = newNormals[curVert];
+        vert.uv1.x = dot(newVerts[curVert], _ClipPlane[1]);
+        vert.uv1.y = dot(newVerts[curVert], _ClipPlane[3]);
+        vert.uv1 = vert.uv1 / _DecalSize;
+
+        vert.position2 = newVerts[curVert+1].xyz;
+        vert.normal2 = newNormals[curVert+1];
+        vert.uv2.x = dot(newVerts[curVert+1], _ClipPlane[1]);
+        vert.uv2.y = dot(newVerts[curVert+1], _ClipPlane[3]);
+        vert.uv2 = vert.uv2 / _DecalSize;
+        _DecalBuffer.Append(vert);
+    }
+}

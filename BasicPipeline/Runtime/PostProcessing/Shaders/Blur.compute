@@ -1,0 +1,76 @@
+#pragma kernel VerticalFilter
+#pragma kernel HorizFilter
+
+#pragma exclude_renderers gles3 glcore
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+
+TEXTURE2D(_BlurInputTexture);
+RW_TEXTURE2D(float4, _BlurOutputRT);
+
+float4 _BlurInputRes;
+
+static const float SampleWeights[13] = {
+    0.002216,
+    0.008764,
+    0.026995,
+    0.064759,
+    0.120985,
+    0.176033,
+    0.199471,
+    0.176033,
+    0.120985,
+    0.064759,
+    0.026995,
+    0.008764,
+    0.002216,
+};
+
+#define kernelhalf 6
+#define groupthreads 128
+groupshared float4 SharedInput[groupthreads];
+
+[numthreads(groupthreads, 1, 1)]
+void VerticalFilter(int3 groupId : SV_GROUPID, int groupIndex : SV_GROUPINDEX)
+{
+    int2 coord = int2(groupId.x, groupIndex - kernelhalf + (groupthreads - kernelhalf * 2) * groupId.y);
+    coord = clamp(coord, int2(0, 0), int2(_BlurInputRes.x - 1, _BlurInputRes.y - 1));
+    SharedInput[groupIndex] = LOAD_TEXTURE2D(_BlurInputTexture, coord);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (groupIndex >= kernelhalf && groupIndex < (groupthreads - kernelhalf) && 
+        (groupIndex - kernelhalf + (groupthreads - kernelhalf * 2) * groupId.y) < _BlurInputRes.y)
+    {
+        float4 avg = 0.0;
+        [unroll]
+        for (int i = -kernelhalf; i <= kernelhalf; ++i)
+        {
+            avg += SharedInput[groupIndex + i] * SampleWeights[i + kernelhalf];
+        }
+
+        _BlurOutputRT[coord] = float4(avg.rgb, 1.0);
+    }
+}
+
+[numthreads(groupthreads, 1, 1)]
+void HorizFilter(int3 groupId : SV_GROUPID, int groupIndex : SV_GROUPINDEX)
+{
+    int2 coord = int2(groupIndex - kernelhalf + (groupthreads - kernelhalf * 2) * groupId.x, groupId.y);
+    coord = clamp(coord, int2(0, 0), int2(_BlurInputRes.x - 1, _BlurInputRes.y - 1));
+    SharedInput[groupIndex] = LOAD_TEXTURE2D(_BlurInputTexture, coord);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (groupIndex >= kernelhalf && groupIndex < (groupthreads - kernelhalf) &&
+        (groupIndex - kernelhalf + (groupthreads - kernelhalf * 2) * groupId.x) < _BlurInputRes.x)
+    {
+        float4 avg = 0.0;
+        [unroll]
+        for (int i = -kernelhalf; i <= kernelhalf; ++i)
+            avg += SharedInput[groupIndex + i] * SampleWeights[i + kernelhalf];
+
+        _BlurOutputRT[coord] = float4(avg.rgb, 1.0);
+    }
+}
+

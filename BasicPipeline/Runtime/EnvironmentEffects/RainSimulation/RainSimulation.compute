@@ -1,0 +1,63 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel SimulateRain
+
+#include "Assets/BasicPipeline/Runtime/ShaderLibrary/Common.hlsl"
+
+#include "ShaderVariablesRain.cs.hlsl"
+
+RWStructuredBuffer<RainDrop> _RainDataBuffer;
+
+TEXTURE2D(_NoiseTex);
+//TEXTURE2D(_HeightTex);
+
+static const int g_RainGroupSize = 4;
+static const int g_NumThreads = 32;
+static const int g_RainGridSize = g_RainGroupSize * g_NumThreads;
+[numthreads(g_NumThreads, g_NumThreads, 1)]
+void SimulateRain(uint3 dispatchThreadId : SV_DISPATCHTHREADID)
+{
+    uint gridIdx = dispatchThreadId.x + dispatchThreadId.y * g_RainGridSize;
+    RainDrop curDrop = _RainDataBuffer[gridIdx];
+
+    curDrop.position += curDrop.velocity * _DeltaTime;
+
+    // Keep the particle inside the bounds
+    float2 offsetAmount = (curDrop.position.xz - _BoundCenter.xz) / _BoundHalfSize.xz;
+    curDrop.position.xz -= _BoundHalfSize.xz * ceil(0.5 * offsetAmount - 0.5);
+
+    // Respawn the particle when it leaves the bound vertically
+    if(abs(curDrop.position.y - _BoundCenter.y) > _BoundHalfSize.y)
+    {
+        // Respawn the particle with random values
+        // Sample the noise from the texture
+        float4 noiseNorm = LOAD_TEXTURE2D(_NoiseTex, dispatchThreadId.xy);
+        float4 noise = noiseNorm * 2.0 - 1.0;
+
+        // Align the position around the bound center
+        curDrop.position.xz = _BoundCenter.xz + _BoundHalfSize.xz * noise.xy;
+
+        // Set the height to a random value close to the top of the bound
+        curDrop.position.y = _BoundCenter.y + _BoundHalfSize.y;
+        curDrop.position.y -= dot(noiseNorm.zw, 0.2f) * _BoundHalfSize.y;
+
+        // Set the initial velocity based on the wind force
+        curDrop.velocity.xz = lerp(_WindForce, _WindForce * noise.zw, _WindVariation);
+        curDrop.velocity.y = _VerticalSpeed;
+    }
+
+    // Check if the particle collided with anything
+    // First transform the drops world position to the height map space
+    //float4 posInHeight = float4(curDrop.position, 1.0);
+    //posInHeight = mul(_ToHeight, posInHeight);
+    //posInHeight.xy = 0.5 * (posInHeight.xy + 1.0);
+    //#if UNITY_UV_STARTS_AT_TOP
+    //    posInHeight.y = 1.0 - posInHeight.y;
+    //#endif
+    //posInHeight.xy *= _HeightMapSize;
+    //float height = LOAD_TEXTURE2D(_HeightTex, posInHeight.xy).r;
+    //curDrop.state = posInHeight.z < height ? 1.0 : -1.0;
+    //#if UNITY_REVERSED_Z
+    //    curDrop.state *= -1.0;
+    //#endif
+    _RainDataBuffer[gridIdx] = curDrop;
+}

@@ -1,0 +1,22 @@
+#pragma kernel Occlusion
+#pragma exclude_renderers gles3 glcore
+
+#include "Assets/BasicPipeline/Runtime/ShaderLibrary/Common.hlsl"
+
+TEXTURE2D(_AOTexture);
+RW_TEXTURE2D(float, _OcclusionRT);
+
+float4 _OcclusionRes;
+
+[numthreads(1024, 1, 1)]
+void Occlusion(uint3 dispatchThreadId : SV_DISPATCHTHREADID)
+{
+	uint2 curPixel = uint2(dispatchThreadId.x % (uint)_OcclusionRes.x, dispatchThreadId.x / (uint)_OcclusionRes.x);
+
+	if(curPixel.y < (uint)_OcclusionRes.y)
+	{
+		float curDepth = LOAD_TEXTURE2D(_AOTexture, curPixel).x;
+
+		_OcclusionRT[curPixel] = curDepth == 0;
+	}
+}

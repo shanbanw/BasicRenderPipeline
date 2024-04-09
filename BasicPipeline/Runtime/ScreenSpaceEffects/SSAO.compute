@@ -1,0 +1,140 @@
+#pragma kernel DepthDownScale
+#pragma kernel SSAOCompute
+
+#pragma exclude_renderers glcore gles3
+
+#include "../ShaderLibrary/Common.hlsl"
+#include "ScreenSpaceAmbientOcclusion.cs.hlsl"
+
+RWStructuredBuffer<float4> _DepthDownScaleBuffer;
+
+[numthreads(1024, 1, 1)]
+void DepthDownScale(uint3 dispatchThreadId : SV_DISPATCHTHREADID)
+{
+    uint width = (uint)_DepthDownScaleRes.x;
+    uint3 curPixel = uint3(dispatchThreadId.x % width, dispatchThreadId.x / width, 0);
+    if (curPixel.y < (uint)_DepthDownScaleRes.y)
+    {
+        float minDepth = 1.0;
+        #if UNITY_REVERSED_Z
+            minDepth = 0.0;
+        #endif
+        float3 avgNormalWS = float3(0.0, 0.0, 0.0);
+        uint3 fullResPixel = curPixel * 2;
+        [unroll]
+        for(int i = 0; i < 2; i++)
+        {
+            [unroll]
+            for(int j = 0; j < 2; j++)
+            {
+                float curDepth = LOAD_TEXTURE2D_MSAA(_DepthTex, fullResPixel, int2(j, i)).r;
+                #if UNITY_REVERSED_Z
+                    minDepth = max(minDepth, curDepth);
+                #else
+                    minDepth = min(minDepth, curDepth);
+                #endif
+                float3 normalWS = LOAD_TEXTURE2D_MSAA(_NormalTex, fullResPixel, int2(j, i)).rgb;
+                avgNormalWS += normalize(normalWS * 2.0 - 1.0);
+            }
+        }
+        _DepthDownScaleBuffer[dispatchThreadId.x].x = ConvertZToLinearDepth(minDepth);
+        float3 avgNormalVS = mul((float3x3)_ViewMatrix, avgNormalWS * 0.25);
+        _DepthDownScaleBuffer[dispatchThreadId.x].yzw = avgNormalVS;
+    }
+}
+
+StructuredBuffer<float4> _DepthDownScaleSRV;
+RW_TEXTURE2D(float, _AORT);
+groupshared float SharedDepths[1024];
+
+// Possion disc sampling pattern
+static const float numSamplesRcp = 1.0 / 8.0;
+static const uint numSamples = 8;
+static const float2 sampleOffsets[numSamples] = 
+{
+    float2(0.2803166, 0.08997212),
+	float2(-0.5130632, 0.6877457),
+	float2(0.425495, 0.8665376),
+	float2(0.8732584, 0.3858971),
+	float2(0.0498111, -0.6287371),
+	float2(-0.9674183, 0.1236534),
+	float2(-0.3788098, -0.09177673),
+	float2(0.6985874, -0.5610316),
+};
+
+float GetDepth(int2 pos)
+{
+    float x = clamp(pos.x, 0, _DepthDownScaleRes.x - 1);
+    float y = clamp(pos.y, 0, _DepthDownScaleRes.y - 1);
+    int minDepthIdx = x + y * _DepthDownScaleRes.x;
+    return _DepthDownScaleSRV[minDepthIdx].x;
+}
+
+float3 GetNormal(int2 pos)
+{
+    float x = clamp(pos.x, 0, _DepthDownScaleRes.x - 1);
+    float y = clamp(pos.y, 0, _DepthDownScaleRes.y - 1);
+    int minDepthIdx = x + y * _DepthDownScaleRes.x;
+    return _DepthDownScaleSRV[minDepthIdx].yzw;
+}
+
+float ComputeAO(int2 centerPixelPos, float2 centerClipPos)
+{
+    float centerDepth = GetDepth(centerPixelPos.xy);
+    float isNotSky = centerDepth < _SSAOMaxDepth;
+    // center pixel viewspace position
+    float3 centerPos;
+    centerPos.xy = centerClipPos * _PerspectiveValues.xy * centerDepth;
+    centerPos.z = -centerDepth;
+    // center normal view space
+    float3 centerNormal = GetNormal(centerPixelPos);
+    centerNormal = normalize(centerNormal);
+
+    // Random sampling offset
+    float rotationAngle = 0.0;
+    //float rotationAngle = dot(float2(centerClipPos), float2(73.0, 197.0));
+    float2 randSinCos;
+    sincos(rotationAngle, randSinCos.x, randSinCos.y);
+    float2x2 randRotMat = float2x2(randSinCos.y, -randSinCos.x, randSinCos.x, randSinCos.y);
+
+    float ao = 0.0;
+    [unroll]
+    for(uint i = 0; i < numSamples; i++)
+    {
+        float2 sampleOffset = _SSAOOffsetRadius.xx * mul(randRotMat, sampleOffsets[i]);
+        float curDepth = GetDepth(centerPixelPos + int2(sampleOffset.x, -sampleOffset.y));
+
+        float3 curPos;
+        curPos.xy = (centerClipPos + 2.0 * sampleOffset * _DepthDownScaleRes.zw) * _PerspectiveValues.xy * curDepth;
+        curPos.z = -curDepth;
+
+        float3 centerToCurPos = curPos - centerPos;
+        float lenCenterToCurPos = length(centerToCurPos);
+        float angleFactor = 1.0 - dot(centerToCurPos / lenCenterToCurPos, centerNormal);
+        float distFactor = lenCenterToCurPos / _SSAORadius;
+
+        ao += saturate(max(distFactor,  angleFactor)) * isNotSky;
+    }
+
+    return ao * numSamplesRcp;
+}
+
+[numthreads(1024, 1, 1)]
+void SSAOCompute(uint3 groupThreadId : SV_GROUPTHREADID, uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    uint width = (uint)_DepthDownScaleRes.x;
+    uint2 curPixel = uint2(dispatchThreadId.x % width, dispatchThreadId.x / width);
+    SharedDepths[groupThreadId.x] = _DepthDownScaleSRV[dispatchThreadId.x].x;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if(curPixel.y < (uint)_DepthDownScaleRes.y)
+    {
+        float2 centerClipPos = 2.0 * float2(curPixel) * _DepthDownScaleRes.zw - 1.0;
+        #if UNITY_UV_STARTS_AT_TOP
+            centerClipPos.y *= -1;
+        #endif
+        _AORT[curPixel] = ComputeAO(curPixel, centerClipPos);
+    }
+}
+

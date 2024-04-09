@@ -1,0 +1,10 @@
+#ifndef _SAMPLER_INCLUDE_
+#define _SAMPLER_INCLUDE_
+
+SamplerState sampler_Linear_Repeat;
+SamplerState sampler_Linear_Clamp;
+SamplerState sampler_Point_Repeat;
+SamplerState sampler_Point_Clamp;
+SamplerComparisonState sampler_Linear_Clamp_Compare;
+
+#endif

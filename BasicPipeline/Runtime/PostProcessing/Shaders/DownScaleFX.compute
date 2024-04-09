@@ -1,0 +1,209 @@
+#pragma kernel DownScaleFirstPass
+#pragma kernel DownScaleSecondPass
+#pragma kernel BloomReveal
+
+#pragma exclude_renderers gles3 glcore
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "PostProcessingShaderVariables.cs.hlsl"
+
+TEXTURE2D(_HDRTexture);
+StructuredBuffer<float> _AverageValues1D;
+RWStructuredBuffer<float> _AverageLum;
+StructuredBuffer<float> _PrevAverageLum;
+
+RW_TEXTURE2D(half4, _DownScaleRT);
+
+groupshared float SharedPositions[1024];
+static const float4 LUM_FACTOR = float4(0.299, 0.587, 0.114, 0);
+
+float DownScale4x4(uint2 curPixel, uint groupThreadId)
+{
+    float avgLum = 0.0;
+    if (curPixel.y < (uint)_Height)
+    {
+        int3 pixelCoord = int3(curPixel * 4, 0);
+        float4 downScaled = float4(0.0, 0.0, 0.0, 0.0);
+        [unroll]
+        for(int i = 0; i < 4; i++)
+        {
+            [unroll]
+            for(int j = 0; j < 4; j++)
+            {
+                //pixelCoord.xy += int2(j, i);
+                downScaled += LOAD_TEXTURE2D_MSAA(_HDRTexture, pixelCoord, int2(j, i));
+                //downScaled += LOAD_TEXTURE2D(_HDRTexture, pixelCoord.xy);
+            }
+        }
+        downScaled /= 16.0;
+        _DownScaleRT[curPixel] = downScaled;
+        avgLum = dot(downScaled, LUM_FACTOR);
+        SharedPositions[groupThreadId] = avgLum;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    return avgLum;
+}
+
+float DownScale1024to4(uint dispatchThreadId, uint groupThreadId, float avgLum)
+{
+    [unroll]
+    for(uint groupSize = 4, step1 = 1, step2 = 2, step3 = 3; groupSize < 1024; groupSize *= 4, step1 *= 4, step2 *= 4, step3 *= 4)
+    {
+        if(groupThreadId % groupSize == 0)
+        {
+            float stepAvgLum = avgLum;
+            stepAvgLum += dispatchThreadId + step1 < (uint)_TotalPixels ? SharedPositions[groupThreadId+step1] : avgLum;
+            stepAvgLum += dispatchThreadId + step2 < (uint)_TotalPixels ? SharedPositions[groupThreadId+step2] : avgLum;
+            stepAvgLum += dispatchThreadId + step3 < (uint)_TotalPixels ? SharedPositions[groupThreadId+step3] : avgLum;
+
+            avgLum = stepAvgLum;
+            SharedPositions[groupThreadId] = stepAvgLum;
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    return avgLum;
+}
+
+void DownScale4to1(uint dispatchThreadId, uint groupThreadId, uint groupId, float avgLum)
+{
+    if(groupThreadId == 0)
+    {
+        float finalAvgLum = avgLum;
+        finalAvgLum += dispatchThreadId+256<(uint)_TotalPixels ? SharedPositions[groupThreadId + 256] : avgLum;
+        finalAvgLum += dispatchThreadId+512<(uint)_TotalPixels ? SharedPositions[groupThreadId + 512] : avgLum;
+        finalAvgLum += dispatchThreadId+768<(uint)_TotalPixels ? SharedPositions[groupThreadId + 768] : avgLum;
+        finalAvgLum /= 1024.0;
+
+        _AverageLum[groupId] = finalAvgLum;
+    }
+}
+
+[numthreads(1024, 1, 1)]
+void DownScaleFirstPass(uint3 dispatchThreadId : SV_DISPATCHTHREADID, uint3 groupThreadId : SV_GROUPTHREADID, uint3 groupId : SV_GROUPID)
+{
+    uint width = (uint)_Width;
+    uint2 curPixel = uint2(dispatchThreadId.x % width, dispatchThreadId.x / width);
+
+    float avgLum = DownScale4x4(curPixel, groupThreadId.x);
+    avgLum = DownScale1024to4(dispatchThreadId.x, groupThreadId.x, avgLum);
+    DownScale4to1(dispatchThreadId.x, groupThreadId.x, groupId.x, avgLum);
+}
+
+#define MAX_GROUPS 64
+groupshared float SharedAvgLum[MAX_GROUPS];
+
+[numthreads(MAX_GROUPS, 1, 1)]
+void DownScaleSecondPass(uint3 dispatchThreadId : SV_DISPATCHTHREADID, uint3 groupThreadId : SV_GROUPTHREADID, uint3 groupId : SV_GROUPID)
+{
+    float avgLum = 0.0;
+    if(dispatchThreadId.x < (uint)_GroupSize)
+    {
+        avgLum = _AverageValues1D[dispatchThreadId.x];
+    }
+    SharedAvgLum[dispatchThreadId.x] = avgLum;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll]
+    for(uint groupSize = 4, step1 = 1, step2 = 2, step3 = 3; groupSize <= MAX_GROUPS; groupSize *= 4, step1 *= 4, step2 *= 4, step3 *= 4)
+    {
+        if (dispatchThreadId.x % groupSize == 0)
+        {
+            float stepAvgLum = avgLum;
+            stepAvgLum += dispatchThreadId.x + step1 < (uint)_GroupSize ? SharedAvgLum[dispatchThreadId.x + step1] : avgLum;
+            stepAvgLum += dispatchThreadId.x + step2 < (uint)_GroupSize ? SharedAvgLum[dispatchThreadId.x + step2] : avgLum;
+            stepAvgLum += dispatchThreadId.x + step3 < (uint)_GroupSize ? SharedAvgLum[dispatchThreadId.x + step3] : avgLum;
+            avgLum = stepAvgLum;
+            SharedAvgLum[dispatchThreadId.x] = stepAvgLum;
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if(dispatchThreadId.x == 0)
+    {
+        float finalAvgLum = avgLum;//SharedAvgLum[0];// + SharedAvgLum[64] + SharedAvgLum[128] + SharedAvgLum[192];
+        finalAvgLum /= 64.0;
+
+        float adaptedAvgLum = lerp(_PrevAverageLum[0], finalAvgLum, _Adaptation);
+
+        _AverageLum[0] = max(adaptedAvgLum, 0.0001);
+    }
+ //   float avgLum = 0.0;
+	//if(dispatchThreadId.x < _GroupSize)
+	//{
+	//	avgLum = _AverageValues1D[dispatchThreadId.x];
+	//}
+	//SharedAvgFinal[dispatchThreadId.x] = avgLum;
+
+	//GroupMemoryBarrierWithGroupSync(); // Sync before next step
+
+	//// Downscale from 64 to 16
+	//if(dispatchThreadId.x % 4 == 0)
+	//{
+	//	// Calculate the luminance sum for this step
+	//	float stepAvgLum = avgLum;
+	//	stepAvgLum += dispatchThreadId.x+1 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+1] : avgLum;
+	//	stepAvgLum += dispatchThreadId.x+2 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+2] : avgLum;
+	//	stepAvgLum += dispatchThreadId.x+3 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+3] : avgLum;
+		
+	//	// Store the results
+	//	avgLum = stepAvgLum;
+	//	SharedAvgFinal[dispatchThreadId.x] = stepAvgLum;
+	//}
+
+	//GroupMemoryBarrierWithGroupSync(); // Sync before next step
+
+	//// Downscale from 16 to 4
+	//if(dispatchThreadId.x % 16 == 0)
+	//{
+	//	// Calculate the luminance sum for this step
+	//	float stepAvgLum = avgLum;
+	//	stepAvgLum += dispatchThreadId.x+4 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+4] : avgLum;
+	//	stepAvgLum += dispatchThreadId.x+8 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+8] : avgLum;
+	//	stepAvgLum += dispatchThreadId.x+12 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+12] : avgLum;
+
+	//	// Store the results
+	//	avgLum = stepAvgLum;
+	//	SharedAvgFinal[dispatchThreadId.x] = stepAvgLum;
+	//}
+
+	//GroupMemoryBarrierWithGroupSync(); // Sync before next step
+
+	//// Downscale from 4 to 1
+	//if(dispatchThreadId.x == 0)
+	//{
+	//	// Calculate the average luminace
+	//	float fFinalLumValue = avgLum;
+	//	fFinalLumValue += dispatchThreadId.x+16 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+16] : avgLum;
+	//	fFinalLumValue += dispatchThreadId.x+32 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+32] : avgLum;
+	//	fFinalLumValue += dispatchThreadId.x+48 < _GroupSize ? SharedAvgFinal[dispatchThreadId.x+48] : avgLum;
+	//	fFinalLumValue /= 64.0;
+
+	//	// Store the final value
+	//	_AverageLum[0] = max(fFinalLumValue, 0.0001);
+
+	//}
+}
+
+TEXTURE2D(_DownScaleTexture);
+StructuredBuffer<float> _AvgLum;
+
+RW_TEXTURE2D(float4, _BloomRT);
+
+[numthreads(1024, 1, 1)]
+void BloomReveal(uint3 dispatchThreadId : SV_DISPATCHTHREADID)
+{
+    uint width = uint(_Width);
+    uint2 curPixel = uint2(dispatchThreadId.x % width, dispatchThreadId.x / width);
+
+    if(curPixel.y < (uint)_Height)
+    {
+        float4 color = LOAD_TEXTURE2D(_DownScaleTexture, curPixel);
+        float lum = dot(color, LUM_FACTOR);
+        float avgLum = _AvgLum[0];
+
+        float colorScale = saturate(lum - avgLum * _BloomThreshold);
+
+        _BloomRT[curPixel] = color * colorScale;
+    }
+}

@@ -1,0 +1,60 @@
+#pragma kernel BokehHighlightScan
+
+static const float4 LUM_FACTOR = float4(0.299, 0.587, 0.114, 0);
+
+#include "Assets/BasicPipeline/Runtime/ShaderLibrary/Common.hlsl"
+#include "PostProcessingShaderVariables.cs.hlsl"
+
+TEXTURE2D(_HDRTexture);
+StructuredBuffer<float> _AvgLum;
+
+struct Bokeh
+{
+    float2 positionCS;
+    float radius;
+    float4 bokehColor;
+};
+AppendStructuredBuffer<Bokeh> _BokehStackBuffer;
+
+[numthreads(1024, 1, 1)]
+void BokehHighlightScan(uint3 dispatchThreadId : SV_DISPATCHTHREADID)
+{
+    uint2 curPixel = uint2(dispatchThreadId.x % (uint)_ViewportSize.x, dispatchThreadId.x / (uint)_ViewportSize.x);
+
+    if(curPixel.y < (uint)_ViewportSize.y)
+    {
+        float depth = LOAD_TEXTURE2D(_DepthTex, curPixel).x;
+        if (depth != UNITY_RAW_FAR_CLIP_VALUE) // Ignore sky
+        {
+            depth = ConvertZToLinearDepth(depth);
+            float blurFactor = saturate((depth - _DOFFarStart) * _DOFFarRangeRcp);
+
+            if (blurFactor > _BokehBlurThreshold)
+            {
+                float4 hdrColor = LOAD_TEXTURE2D(_HDRTexture, curPixel);
+                float lum = dot(hdrColor, LUM_FACTOR);
+                float avgLum = _AvgLum[0];
+
+                float lumFactor = saturate(lum - avgLum * _BokehLumThreshold);
+
+                if (lumFactor > 0.0)
+                {
+                    Bokeh bokeh;
+                    bokeh.positionCS = 2.0 * float2(curPixel.x, curPixel.y) / _ViewportSize.xy - 1.0;
+                    #if UNITY_UV_STARTS_AT_TOP
+                        bokeh.positionCS.y *= -1.0;
+                    #endif
+                    bokeh.radius = (blurFactor - _BokehBlurThreshold) * _BokehRadiusScale;
+
+                    float LScale = lum * _MiddleGrey / avgLum;
+                    LScale = (LScale + LScale * LScale / _LumWhiteSqr) / (1.0 + LScale);
+                    bokeh.bokehColor.xyz = hdrColor.rgb * LScale * lumFactor;
+                    bokeh.bokehColor.w = _BokehColorScale;
+
+                    _BokehStackBuffer.Append(bokeh);
+                }
+            }
+        }
+    }
+}
+
