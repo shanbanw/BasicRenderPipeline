@@ -1,5 +1,6 @@
 
 #pragma kernel DecalGen
+#pragma kernel GenVertexStream
 
 #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
 #include "ShaderVariablesDecals.cs.hlsl"
@@ -141,21 +142,53 @@ void DecalGen(uint dispatchThreadId : SV_DISPATCHTHREADID)
     {
         vert.position0 = newVerts[0].xyz;
         vert.normal0 = newNormals[0];
-        vert.uv0.x = dot(newVerts[0], _ClipPlane[1]);
-        vert.uv0.y = dot(newVerts[0], _ClipPlane[3]);
+        vert.uv0.x = dot(newVerts[0], _ClipPlane[0]);
+        vert.uv0.y = dot(newVerts[0], _ClipPlane[2]);
         vert.uv0 = vert.uv0 / _DecalSize;
 
         vert.position1 = newVerts[curVert].xyz;
         vert.normal1 = newNormals[curVert];
-        vert.uv1.x = dot(newVerts[curVert], _ClipPlane[1]);
-        vert.uv1.y = dot(newVerts[curVert], _ClipPlane[3]);
+        vert.uv1.x = dot(newVerts[curVert], _ClipPlane[0]);
+        vert.uv1.y = dot(newVerts[curVert], _ClipPlane[2]);
         vert.uv1 = vert.uv1 / _DecalSize;
 
         vert.position2 = newVerts[curVert+1].xyz;
         vert.normal2 = newNormals[curVert+1];
-        vert.uv2.x = dot(newVerts[curVert+1], _ClipPlane[1]);
-        vert.uv2.y = dot(newVerts[curVert+1], _ClipPlane[3]);
+        vert.uv2.x = dot(newVerts[curVert+1], _ClipPlane[0]);
+        vert.uv2.y = dot(newVerts[curVert+1], _ClipPlane[2]);
         vert.uv2 = vert.uv2 / _DecalSize;
         _DecalBuffer.Append(vert);
     }
+}
+
+RWStructuredBuffer<DecalVertex> _DecalVertexBuffer;
+StructuredBuffer<DecalVertexLayout> _DecalBufferSRV;
+
+[numthreads(3, 1, 1)]
+void GenVertexStream(uint dispatchThreadId : SV_DISPATCHTHREADID, uint groupThreadId : SV_GROUPTHREADID)
+{
+    uint triIndex = dispatchThreadId.x / 3;
+    
+    DecalVertexLayout layout = _DecalBufferSRV[triIndex];
+    DecalVertex vert;
+    if(groupThreadId.x == 0)
+    {
+        vert.position = layout.position0;
+        vert.normal = layout.normal0;
+        vert.uv = layout.uv0;
+    }
+    else if (groupThreadId.x == 1)
+    {
+        vert.position = layout.position1;
+        vert.normal = layout.normal1;
+        vert.uv = layout.uv1;
+    }
+    else
+    {
+        vert.position = layout.position2;
+        vert.normal = layout.normal2;
+        vert.uv = layout.uv2;
+    }
+    _DecalVertexBuffer.IncrementCounter();
+    _DecalVertexBuffer[dispatchThreadId.x] = vert;
 }
